@@ -5,11 +5,11 @@ provider "aws" {
  
 terraform {
   backend "s3" {
-    bucket         = "kops-project-team-1"
+    bucket         = "kops-project"
     key            = "infra/terraform.tfstate"
     region         = "eu-west-3"
     #profile        = "kops-project"
-    dynamodb_table = "terraform-locks-team1"
+    dynamodb_table = "terraform-locks"
     encrypt        = true
     #use_lockfile   = true
   }
