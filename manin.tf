@@ -113,3 +113,97 @@ resource "aws_secretsmanager_secret_version" "github_credentials" {
     password = var.github_password
   })
 }
+resource "aws_iam_instance_profile" "ssm_profile" {
+  name = "${local.name}-ssm-profile1"
+  role = aws_iam_role.ssm_role.name
+}
+ 
+# this block creates keypair
+resource "tls_private_key" "key" {
+  algorithm = "RSA"
+  rsa_bits  = 4096
+}
+ 
+resource "local_file" "private_key" {
+  content         = tls_private_key.key.private_key_pem
+  filename        = "${local.name}-key.pem"
+  file_permission = "640"
+}
+ 
+resource "aws_key_pair" "public_key" {
+  key_name   = "${local.name}-public_key"
+  public_key = tls_private_key.key.public_key_openssh
+}
+ 
+# Security Group (no SSH access)
+resource "aws_security_group" "kops_sg" {
+  name        = "${local.name}-sg"
+  description = "Allow all egress traffic only"
+  vpc_id      = data.aws_vpc.existing.id
+ 
+  # No ingress rules — no SSH access
+ 
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+ 
+  tags = {
+    Name = "${local.name}-sg"
+  }
+}
+ 
+data "aws_vpc" "existing" {
+  tags = var.vpc_tags
+}
+ 
+data "aws_subnet" "existing" {
+  vpc_id = data.aws_vpc.existing.id
+  tags   = var.subnet_tags
+}
+ 
+# Data source to get the latest Ubuntu AMI
+data "aws_ami" "ubuntu" {
+  most_recent = true
+  owners      = ["099720109477"] # Canonical
+  filter {
+    name   = "name"
+    values = ["ubuntu/images/hvm-ssd/ubuntu-jammy-22.04-amd64-server-*"]
+  }
+  filter {
+    name   = "virtualization-type"
+    values = ["hvm"]
+  }
+}
+# EC2 Instance for Kops Admin (SSM only)
+resource "aws_instance" "kops_server" {
+  ami                         = data.aws_ami.ubuntu.id
+  instance_type               = "t2.medium"
+  subnet_id                   = data.aws_subnet.existing.id
+  vpc_security_group_ids      = [aws_security_group.kops_sg.id]
+  iam_instance_profile        = aws_iam_instance_profile.ssm_profile.name
+  key_name                    = aws_key_pair.public_key.key_name
+  associate_public_ip_address = true
+  user_data_base64            = base64gzip(local.user_data)
+  user_data_replace_on_change = true
+ 
+  tags = {
+    Name = "${local.name}-admin-server"
+  }
+}
+ 
+data "aws_route53_zone" "main" {
+  name         = ""
+  private_zone = false
+}
+ 
+# Route53 A Record for Kops Admin Server
+resource "aws_route53_record" "kops_dns" {
+  zone_id = data.aws_route53_zone.main.zone_id
+  name    = "kops.${data.aws_route53_zone.main.name}"
+  type    = "A"
+  ttl     = 300
+  records = [aws_instance.kops_server.public_ip]
+}
