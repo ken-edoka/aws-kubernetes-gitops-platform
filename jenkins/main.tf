@@ -157,3 +157,93 @@ resource "aws_security_group" "jenkins_elb_sg" {
     Name = "${local.name}-jenkins-elb-sg"
   }
 }
+
+# Get the latest RHEL 9 AMI for eu-west-1 (Red Hat official account)
+data "aws_ami" "redhat" {
+  most_recent = true
+  owners      = ["309956199498"] # Red Hat official AWS account
+  filter {
+    name   = "name"
+    values = ["RHEL-8.*_HVM-*-x86_64-*"]
+  }
+  filter {
+    name   = "virtualization-type"
+    values = ["hvm"]
+  }
+}
+
+# instance and installing jenkins
+resource "aws_instance" "jenkins" {
+  ami                         = data.aws_ami.redhat.id
+  instance_type               = "t2.large"
+  subnet_id                   = aws_subnet.public_subnet[1].id
+  key_name                    = aws_key_pair.public_key.key_name
+  vpc_security_group_ids      = [aws_security_group.jenkins_sg.id]
+  iam_instance_profile        = aws_iam_instance_profile.jenkins_instance_profile.name
+  associate_public_ip_address = true
+  user_data = templatefile("${path.module}/jenkins.sh", {
+    newrelic_api_key    = var.newrelic_api_key
+    newrelic_account_id = var.newrelic_account_id
+    region              = var.region
+  })
+  root_block_device {
+    volume_size = 100
+    volume_type = "gp3"
+    encrypted   = true
+  }
+  tags = {
+    Name = "${local.name}-jenkins"
+  }
+}
+#creating Jenkins elb
+resource "aws_elb" "elb-jenkins" {
+  name            = "${local.name}-elb-jenkins"
+  security_groups = [aws_security_group.jenkins_elb_sg.id]
+  subnets         = aws_subnet.public_subnet[*].id
+
+  listener {
+    instance_port      = 8080
+    instance_protocol  = "http"
+    lb_port            = 443
+    lb_protocol        = "https"
+    ssl_certificate_id = aws_acm_certificate.acm-cert.arn
+  }
+
+  health_check {
+    healthy_threshold   = 2
+    unhealthy_threshold = 2
+    timeout             = 29
+    target              = "tcp:8080"
+    interval            = 30
+  }
+
+  instances                   = [aws_instance.jenkins.id]
+  cross_zone_load_balancing   = true
+  idle_timeout                = 400
+  connection_draining         = true
+  connection_draining_timeout = 400
+
+  tags = {
+    Name = "${local.name}-elb-jenkins"
+  }
+}
+
+# Lookup the existing Route 53 hosted zone
+data "aws_route53_zone" "my-hosted-zone" {
+  name         = var.domain_name
+  private_zone = false
+}
+
+# Create ACM certificate with DNS validation
+resource "aws_acm_certificate" "acm-cert" {
+  domain_name               = var.domain_name
+  subject_alternative_names = ["*.${var.domain_name}"]
+  validation_method         = "DNS"
+  lifecycle {
+    create_before_destroy = true
+  }
+
+  tags = {
+    Name = "${local.name}-acm-cert"
+  }
+}
