@@ -228,6 +228,7 @@ resource "aws_elb" "elb-jenkins" {
   }
 }
 
+
 # Lookup the existing Route 53 hosted zone
 data "aws_route53_zone" "my-hosted-zone" {
   name         = var.domain_name
@@ -245,5 +246,41 @@ resource "aws_acm_certificate" "acm-cert" {
 
   tags = {
     Name = "${local.name}-acm-cert"
+  }
+}
+
+# fetch DNS validation records for the ACM certificate
+resource "aws_route53_record" "acm_validation_records" {
+  for_each = {
+    for dvo in aws_acm_certificate.acm-cert.domain_validation_options : dvo.domain_name => {
+      name   = dvo.resource_record_name
+      record = dvo.resource_record_value
+      type   = dvo.resource_record_type
+    }
+  }
+
+  allow_overwrite = true
+  zone_id         = data.aws_route53_zone.my-hosted-zone.zone_id
+  name            = each.value.name
+  type            = each.value.type
+  ttl             = 60
+  records         = [each.value.record]
+}
+
+# Validate the ACM certificate after DNS records are created
+resource "aws_acm_certificate_validation" "acm_cert_validation" {
+  certificate_arn         = aws_acm_certificate.acm-cert.arn
+  validation_record_fqdns = [for r in aws_route53_record.acm_validation_records : r.fqdn]
+}
+
+#creating A jenkins record
+resource "aws_route53_record" "jenkins-record" {
+  zone_id = data.aws_route53_zone.my-hosted-zone.zone_id
+  name    = "jenkins.${var.domain_name}"
+  type    = "A"
+  alias {
+    name                   = aws_elb.elb-jenkins.dns_name
+    zone_id                = aws_elb.elb-jenkins.zone_id
+    evaluate_target_health = true
   }
 }
